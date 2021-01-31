@@ -41,10 +41,12 @@
 static void uv__async_send(uv_loop_t* loop);
 static int uv__async_start(uv_loop_t* loop);
 
+// 此函数会初始化并启动loop上的async_io_watcher，
+// 然后将参数中的uv_async_t同时插入到loop的handle_queue队列和async_handles队列中。
 // 此函数可能被调用多次(目前只看到在uv_loop_init函数中调用了一次)，
 // 导致loop中的handle_queue队列中有多个uv_async_t类型的handle，
 // 但是loop只有一个async_io_watcher，所以当async_io_watcher监听的fd上有io事件发生时，
-// 无法确定要调哪个uv_async_t类型的handle上的回调函数
+// 无法确定要调哪个uv_async_t类型的handle上的回调函数。
 int uv_async_init(uv_loop_t* loop, uv_async_t* handle, uv_async_cb async_cb) {
   int err;
 
@@ -52,6 +54,9 @@ int uv_async_init(uv_loop_t* loop, uv_async_t* handle, uv_async_cb async_cb) {
   // 初始化其实就是设置async_io_watcher的成员。
   // 启动其实就是将async_io_watcher插入到loop的watcher_queue队列中，
   // 并将async_io_watcher的地址写入loop的watchers指向的数组中，以async_io_watcher中的fd作为索引，找到数组的槽位。
+  // 还会创建一个管道（本质上是一个内核缓冲区），将该管道的读fd存到async_io_watcher中，将该管道的写fd存到loop的async_wfd中。
+  // 多次调用此函数时，只有第一次会初始化并启动loop->async_io_watcher，
+  // 之后的调用会由于loop->async_io_watcher中已经有了写fd而直接返回，避免重复初始化。
   err = uv__async_start(loop);
   if (err)
     return err;
@@ -69,7 +74,9 @@ int uv_async_init(uv_loop_t* loop, uv_async_t* handle, uv_async_cb async_cb) {
   return 0;
 }
 
-
+// 线程池中的线程向loop->async_io_watcher.fd中写数据，
+// 同时设置handle的pending状态，以便事件循环线程被唤醒之后能够分辨要调用
+// loop的async_handles队列中的哪些handle上的回调。
 int uv_async_send(uv_async_t* handle) {
   /* Do a cheap read first. */
   if (ACCESS_ONCE(int, handle->pending) != 0)
@@ -134,8 +141,11 @@ void uv__async_close(uv_async_t* handle) {
   uv__handle_stop(handle);
 }
 
-// 此函数作为loop的async_io_watcher上的回调函数
-// 参数w就是loop的async_io_watcher
+// 此函数作为loop的async_io_watcher上的回调函数，参数w就是loop的async_io_watcher。
+// 当loop的async_io_watcher监听的fd（管道上的读fd）上有数据ready时，
+// 事件循环会调用loop的async_io_watcher上的回调，即此函数。
+// 此函数则去遍历loop的async_handles队列中所有的handle（uv_async_t类型），调用其上的回调。
+// uv_async_t上的回调由应用程序提供。
 static void uv__async_io(uv_loop_t* loop, uv__io_t* w, unsigned int events) {
   char buf[1024];
   ssize_t r;
@@ -145,6 +155,8 @@ static void uv__async_io(uv_loop_t* loop, uv__io_t* w, unsigned int events) {
 
   assert(w == &loop->async_io_watcher);
 
+  // 此循环中读出来的数据无实际用途。
+  // 线程池中的线程往这个fd中写数据只是为了唤醒事件循环线程。
   for (;;) {
     r = read(w->fd, buf, sizeof(buf));
 
@@ -176,7 +188,7 @@ static void uv__async_io(uv_loop_t* loop, uv__io_t* w, unsigned int events) {
     QUEUE_INSERT_TAIL(&loop->async_handles, q);
 
     // 此函数是个死循环，等待uv_async_t上的pending状态变为0或2，
-    // 0表示uv_async_t没有挂起；1表示uv_async_t虽然挂起了，但是其他线程已经用完了uv_async_t。
+    // 0表示uv_async_t没有挂起；2表示uv_async_t虽然挂起了，但是其他线程已经用完了uv_async_t。
     if (0 == uv__async_spin(h))
       continue;  /* Not pending. */
 
@@ -246,7 +258,7 @@ static int uv__async_start(uv_loop_t* loop) {
     return err;
 #endif
 
-  // 在初始化async_io_watcher时会将第235行创建的事件管道的fd赋给async_io_watcher的fd，
+  // 在初始化async_io_watcher时会将刚刚创建的事件管道的fd赋给async_io_watcher的fd，
   // 即表示从这个事件管道中读取数据。
   uv__io_init(&loop->async_io_watcher, uv__async_io, pipefd[0]);
   uv__io_start(loop, &loop->async_io_watcher, POLLIN);

@@ -275,6 +275,10 @@ typedef struct {
 #define UV_WRITE_PRIVATE_FIELDS                                               \
   void* queue[2];                                                             \
   unsigned int write_index;                                                   \
+  /*bufs指向uv_buf_t数组。*/                                                    \
+  /*每个uv_buf_t持有一个char*和一个长度len，所以一个uv_buf_t相当于一个字符串*/        \
+  /*所以bufs指向一个字符串数组。*/                                                 \
+  /*所以uv_write_s这种request是通过一个字符串数组的形式持有要写入到fd的数据的。*/       \
   uv_buf_t* bufs;                                                             \
   unsigned int nbufs;                                                         \
   int error;                                                                  \
@@ -303,6 +307,8 @@ typedef struct {
   uv_connect_t *connect_req;                                                  \
   uv_shutdown_t *shutdown_req;                                                \
   uv__io_t io_watcher;                                                        \
+  /*队列节点，用于维护req队列。req通过void* queue[2]成员插入到此队列中。*/            \
+  /*每个req持有一个字符串数组，这些字符串将被写到stream中的io观察者观察的fd中。*/        \
   void* write_queue[2];                                                       \
   void* write_completed_queue[2];                                             \
   uv_connection_cb connection_cb;                                             \

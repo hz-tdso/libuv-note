@@ -116,6 +116,7 @@ void uv__stream_init(uv_loop_t* loop,
   stream->select = NULL;
 #endif /* defined(__APPLE_) */
 
+  // fd是-1?
   uv__io_init(&stream->io_watcher, uv__stream_io, -1);
 }
 
@@ -676,6 +677,9 @@ int uv_listen(uv_stream_t* stream, int backlog, uv_connection_cb cb) {
 }
 
 
+// drain：排水
+// 此函数首先会检查stream上的write_queue队列是否为空，
+// 然后停掉stream上的io观察者，执行stream中的shutdown_req上的回调。
 static void uv__drain(uv_stream_t* stream) {
   uv_shutdown_t* req;
   int err;
@@ -758,7 +762,9 @@ static int uv__write_req_update(uv_stream_t* stream,
   return req->write_index == req->nbufs;
 }
 
-
+// 将req从stream的write_queue队列中移除，插入到stream的write_completed_queue队列中；
+// 同时还会将stream中的io观察者插入到loop的pending_queue队列中，
+// 插完之后，会导致io观察者同时在loop的watcher_queue和pending_queue中。
 static void uv__write_req_finish(uv_write_t* req) {
   uv_stream_t* stream = req->handle;
 
@@ -815,6 +821,7 @@ start:
   if (QUEUE_EMPTY(&stream->write_queue))
     return;
 
+  // 每次只写一个req
   q = QUEUE_HEAD(&stream->write_queue);
   req = QUEUE_DATA(q, uv_write_t, queue);
   assert(req->handle == stream);
@@ -824,7 +831,10 @@ start:
    * because Windows's WSABUF is not an iovec.
    */
   assert(sizeof(uv_buf_t) == sizeof(struct iovec));
+  // iov指向req的字符串数组中第一个要写到fd中的字符串。
   iov = (struct iovec*) &(req->bufs[req->write_index]);
+  // iovcnt表示从iov开始有多少个字符串要写到fd中。
+  // iov和iovcnt结合起来，确定了req的字符串数组中的一个slice，该slice将被写到目标fd中。
   iovcnt = req->nbufs - req->write_index;
 
   iovmax = uv__getiovmax();
@@ -852,6 +862,7 @@ start:
       goto error;
     }
 
+    // 数据将被送到此fd中
     fd_to_send = uv__handle_fd((uv_handle_t*) req->send_handle);
 
     memset(&scratch, 0, sizeof(scratch));
@@ -887,6 +898,7 @@ start:
     if (n >= 0)
       req->send_handle = NULL;
   } else {
+    // req上没有send_handle时执行此分支
     do
       n = uv__writev(uv__stream_fd(stream), iov, iovcnt);
     while (n == -1 && RETRY_ON_WRITE_ERROR(errno));
@@ -1152,6 +1164,7 @@ static void uv__read(uv_stream_t* stream) {
 
     if (!is_ipc) {
       do {
+        // 从stream中的io观察者观察的fd上读数据，读到buf中。
         nread = read(uv__stream_fd(stream), buf.base, buf.len);
       }
       while (nread < 0 && errno == EINTR);
@@ -1208,6 +1221,7 @@ static void uv__read(uv_stream_t* stream) {
       if (is_ipc) {
         err = uv__stream_recv_cmsg(stream, &msg);
         if (err != 0) {
+          // 此时已从fd上读完数据，调用read_cb回调函数处理数据。
           stream->read_cb(stream, err, &buf);
           return;
         }
@@ -1283,7 +1297,9 @@ int uv_shutdown(uv_shutdown_t* req, uv_stream_t* stream, uv_shutdown_cb cb) {
   return 0;
 }
 
-
+// 在初始化uv_stream_t时将此函数挂到了uv_stream_t中的io观察者上
+// 当uv_stream_t中的io观察者监听的fd上有目标事件发生时，就调用此回调函数。
+// 此函数根据事件类型决定调用uv__read、uv__stream_eof还是uv__write。
 static void uv__stream_io(uv_loop_t* loop, uv__io_t* w, unsigned int events) {
   uv_stream_t* stream;
 
@@ -1389,7 +1405,7 @@ static void uv__stream_connect(uv_stream_t* stream) {
   }
 }
 
-
+// stream对外暴露的写接口之一：以write（POLLOUT）方式启动stream
 int uv_write2(uv_write_t* req,
               uv_stream_t* stream,
               const uv_buf_t bufs[],
@@ -1411,6 +1427,7 @@ int uv_write2(uv_write_t* req,
     return UV_EPIPE;
 
   if (send_handle) {
+    // 只有ipc不为null且类型是有名管道的stream才能有send_handle
     if (stream->type != UV_NAMED_PIPE || !((uv_pipe_t*)stream)->ipc)
       return UV_EINVAL;
 
@@ -1439,13 +1456,16 @@ int uv_write2(uv_write_t* req,
   empty_queue = (stream->write_queue_size == 0);
 
   /* Initialize the req */
+  // 所谓初始化req，实际上只是设置了req的类型，并将loop的active req数加一
   uv__req_init(stream->loop, req, UV_WRITE);
   req->cb = cb;
+  // 指定了req隶属于哪个stream
   req->handle = stream;
   req->error = 0;
   req->send_handle = send_handle;
   QUEUE_INIT(&req->queue);
 
+  // 默认有四个buf
   req->bufs = req->bufsml;
   if (nbufs > ARRAY_SIZE(req->bufsml))
     req->bufs = uv__malloc(nbufs * sizeof(bufs[0]));
@@ -1454,8 +1474,11 @@ int uv_write2(uv_write_t* req,
     return UV_ENOMEM;
 
   memcpy(req->bufs, bufs, nbufs * sizeof(bufs[0]));
+  // req->nbufs表示req中要写到fd中的字符串的数量。
   req->nbufs = nbufs;
+  // req->write_index表示下一次要写到fd的字符串的索引。
   req->write_index = 0;
+  // 字节数
   stream->write_queue_size += uv__count_bufs(bufs, nbufs);
 
   /* Append the request to write_queue. */
@@ -1469,9 +1492,14 @@ int uv_write2(uv_write_t* req,
     /* Still connecting, do nothing. */
   }
   else if (empty_queue) {
+    // 进到这里，说明在把参数中的req插入到stream的write_queue队列中之前，stream上没有要写到fd的数据，
+    // 参数中的req中的字符串数组是唯一要写的数据。这种情况下，libuv会立即尝试写数据到目标fd中。
+    // uv__write函数是内部函数。
     uv__write(stream);
   }
   else {
+    // 进到这里，说明在将参数中地req插入到stream的req队列中之前，队列中已经有待写入目标fd中的数据。
+    // 这种情况下，libuv选择异步监听，然后立即返回。
     /*
      * blocking streams should never have anything in the queue.
      * if this assert fires then somehow the blocking stream isn't being
@@ -1489,6 +1517,7 @@ int uv_write2(uv_write_t* req,
 /* The buffers to be written must remain valid until the callback is called.
  * This is not required for the uv_buf_t array.
  */
+// stream对外暴露的写接口之二
 int uv_write(uv_write_t* req,
              uv_stream_t* handle,
              const uv_buf_t bufs[],
@@ -1551,7 +1580,7 @@ int uv_try_write(uv_stream_t* stream,
     return written;
 }
 
-
+// 以read（POLLIN）方式启动stream
 int uv__read_start(uv_stream_t* stream,
                    uv_alloc_cb alloc_cb,
                    uv_read_cb read_cb) {

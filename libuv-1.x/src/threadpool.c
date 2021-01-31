@@ -36,6 +36,9 @@ static unsigned int idle_threads;
 static unsigned int slow_io_work_running;
 static unsigned int nthreads;
 static uv_thread_t* threads;
+// default_threads是static uv_thread_t default_threads[4]这个数组的首地址
+// uv_thread_t是unsigned long int的别名，
+// 此数组中存储着线程id。
 static uv_thread_t default_threads[4];
 // 这个QUEUE作为"节点本身"没有什么作用，仅作为标记，表示线程该退出了。
 static QUEUE exit_message;
@@ -57,6 +60,7 @@ static void uv__cancelled(struct uv__work* w) {
 /* To avoid deadlock with uv_cancel() it's crucial that the worker
  * never holds the global mutex and the loop-local mutex at the same time.
  */
+// 线程创建出来之后，就开始执行这个函数
 static void worker(void* arg) {
   struct uv__work* w;
   QUEUE* q;
@@ -65,7 +69,7 @@ static void worker(void* arg) {
   uv_sem_post((uv_sem_t*) arg);
   arg = NULL;
 
-  // 多个线程同时调用worker函数时，需抢占锁
+  // 多个线程同时在执行worker函数，所以需抢占锁。
   uv_mutex_lock(&mutex);
   for (;;) {
     /* `mutex` should always be locked at this point. */
@@ -202,9 +206,6 @@ static void init_threads(void) {
   const char* val;
   uv_sem_t sem;
 
-  // default_threads是static uv_thread_t default_threads[4]这个数组的首地址
-  // uv_thread_t是unsigned long int的别名，
-  // 此数组中存储着线程标识符。
   nthreads = ARRAY_SIZE(default_threads);
   val = getenv("UV_THREADPOOL_SIZE");
   if (val != NULL)
@@ -241,6 +242,7 @@ static void init_threads(void) {
     abort();
 
   for (i = 0; i < nthreads; i++)
+    // worker是线程要执行的函数
     if (uv_thread_create(threads + i, worker, &sem))
       abort();
 

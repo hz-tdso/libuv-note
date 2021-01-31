@@ -106,7 +106,7 @@ int uv_loop_init(uv_loop_t* loop) {
   if (err)
     goto fail_mutex_init;
 
-  // wq_async的类型是uv_async_t，wq_async是一个handler
+  // wq_async是一个uv_async_t类型的handler
   err = uv_async_init(loop, &loop->wq_async, uv__work_done);
   if (err)
     goto fail_async_init;
